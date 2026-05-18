@@ -1,0 +1,4 @@
+VLM
+-> Isolated Software Project
+-> Qt UI Framework (QML) + Backend Codes (C++)
+-> 기계 번역(ArgosTranslate) + VLM(Llama3.2-vision) 형태로 구현

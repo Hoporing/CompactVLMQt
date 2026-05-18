@@ -1,0 +1,26 @@
+build/
+.qtc/
+.qtcreator/
+*.user
+*.user.*
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.autosave
+
+# Claude Code
+.claude/
+
+# 빌드 산출물
+installer/*.exe
+tools/*.exe
+
+# 번역 모델 (용량 큰 Binary)
+tools/argos_data/
+
+# Qt generated
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+*.qm

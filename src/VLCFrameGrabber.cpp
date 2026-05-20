@@ -3,6 +3,7 @@
 #include <QUrl>
 #include <QByteArray>
 #include <QString>
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
@@ -11,25 +12,36 @@
 std::shared_ptr<libvlc_instance_t> VLCFrameGrabber::g_sharedInstance = nullptr;
 
 // ────────────────────────────────────────────────────────────────
-// Static callbacks → instance method dispatch
+// Static vmem callbacks → instance method dispatch
 // ────────────────────────────────────────────────────────────────
-void VLCFrameGrabber::StaticVideoPrerender(void *p_video_data,
-                                           uint8_t **pp_pixel_buffer,
-                                           int size)
+unsigned VLCFrameGrabber::StaticVideoSetup(void **opaque, char *chroma,
+                                            unsigned *width, unsigned *height,
+                                            unsigned *pitches, unsigned *lines)
 {
-    auto *self = static_cast<VLCFrameGrabber *>(p_video_data);
-    if (self) self->VideoPrerender(pp_pixel_buffer, size);
+    return static_cast<VLCFrameGrabber*>(*opaque)->VideoSetup(chroma, width, height, pitches, lines);
 }
 
-void VLCFrameGrabber::StaticVideoPostrender(void *p_video_data,
-                                            uint8_t *p_pixel_buffer)
+void VLCFrameGrabber::StaticVideoCleanup(void * /*opaque*/)
 {
-    auto *self = static_cast<VLCFrameGrabber *>(p_video_data);
-    if (self) self->VideoPostrender(p_pixel_buffer);
+}
+
+void* VLCFrameGrabber::StaticVideoLock(void *opaque, void **planes)
+{
+    return static_cast<VLCFrameGrabber*>(opaque)->VideoLock(planes);
+}
+
+void VLCFrameGrabber::StaticVideoUnlock(void *opaque, void *picture, void * const *planes)
+{
+    static_cast<VLCFrameGrabber*>(opaque)->VideoUnlock(picture, planes);
+}
+
+void VLCFrameGrabber::StaticVideoDisplay(void *opaque, void *picture)
+{
+    static_cast<VLCFrameGrabber*>(opaque)->VideoDisplay(picture);
 }
 
 // ────────────────────────────────────────────────────────────────
-// RTSP / file mode detection (std::string based)
+// RTSP / file mode detection
 // ────────────────────────────────────────────────────────────────
 ModeVLC VLCFrameGrabber::GetMode(const std::string &url)
 {
@@ -61,17 +73,16 @@ VLCFrameGrabber::~VLCFrameGrabber()
 }
 
 // ────────────────────────────────────────────────────────────────
-// libvlc initialization (same arguments as original MFC implementation)
+// libvlc initialization
 // ────────────────────────────────────────────────────────────────
 bool VLCFrameGrabber::Init()
 {
     if (!g_sharedInstance) {
         const char *args[] = {
             "--ignore-config",
-            "--no-video",
+            "--no-audio",          // Audio not needed for frame capture
             "--drop-late-frames",
             "--skip-frames",
-            "--avcodec-hw=none",   // Disable GPU decoding for smem transcode compatibility
             "--network-caching=300",
             "--live-caching=300",
             "--file-caching=300",
@@ -82,7 +93,6 @@ bool VLCFrameGrabber::Init()
             [](libvlc_instance_t *i) { if (i) libvlc_release(i); });
 
         if (g_sharedInstance) {
-            // Forward VLC WARNING/ERROR to stderr
             libvlc_log_set(g_sharedInstance.get(),
                 [](void *, int level, const libvlc_log_t *, const char *fmt, va_list args) {
                     if (level < LIBVLC_WARNING) return;
@@ -98,7 +108,7 @@ bool VLCFrameGrabber::Init()
 }
 
 // ────────────────────────────────────────────────────────────────
-// OpenVideo
+// OpenVideo — vmem approach (no transcode+smem)
 // ────────────────────────────────────────────────────────────────
 bool VLCFrameGrabber::OpenVideo(const QString &url, int width, int height)
 {
@@ -106,47 +116,6 @@ bool VLCFrameGrabber::OpenVideo(const QString &url, int width, int height)
 
     m_iWidth  = width;
     m_iHeight = height;
-
-    // ── sout option string ────────────────────────────────────────
-    // File: time-sync enabled, audio included
-    // RTSP: no-time-sync (prevents live stream timestamp issues), audio excluded
-    // Note: no space between transcode} and :smem{ required for VLC chain parsing
-    char pszOptions[1024] = {};
-    if (m_mode == ModeVLC::VIDEOFILE) {
-        snprintf(pszOptions, sizeof(pszOptions),
-                 ":sout=#transcode{"
-                 "vcodec=RV24,"
-                 "acodec=s16l,"
-                 "threads=2,"
-                 "width=%d"
-                 "}:smem{"
-                 "time-sync,"
-                 "video-prerender-callback=%lld,"
-                 "video-postrender-callback=%lld,"
-                 "video-data=%lld"
-                 "}",
-                 m_iWidth,
-                 reinterpret_cast<long long>(&VLCFrameGrabber::StaticVideoPrerender),
-                 reinterpret_cast<long long>(&VLCFrameGrabber::StaticVideoPostrender),
-                 reinterpret_cast<long long>(this));
-    } else {
-        snprintf(pszOptions, sizeof(pszOptions),
-                 ":sout=#transcode{"
-                 "vcodec=RV24,"
-                 "acodec=none,"
-                 "threads=2,"
-                 "width=%d"
-                 "}:smem{"
-                 "no-time-sync,"
-                 "video-prerender-callback=%lld,"
-                 "video-postrender-callback=%lld,"
-                 "video-data=%lld"
-                 "}",
-                 m_iWidth,
-                 reinterpret_cast<long long>(&VLCFrameGrabber::StaticVideoPrerender),
-                 reinterpret_cast<long long>(&VLCFrameGrabber::StaticVideoPostrender),
-                 reinterpret_cast<long long>(this));
-    }
 
     // ── Create media ──────────────────────────────────────────────
     std::string mrl;
@@ -160,8 +129,6 @@ bool VLCFrameGrabber::OpenVideo(const QString &url, int width, int height)
     m_pMedia = libvlc_media_new_location(m_pInstance, mrl.c_str());
     if (!m_pMedia) { std::cerr << "[VLC] FAIL: libvlc_media_new_location\n"; return false; }
 
-    libvlc_media_add_option(m_pMedia, pszOptions);
-
     if (m_mode == ModeVLC::RTSPSTREAM) {
         libvlc_media_add_option(m_pMedia, ":rtsp-tcp");
     }
@@ -171,24 +138,35 @@ bool VLCFrameGrabber::OpenVideo(const QString &url, int width, int height)
     m_pMediaPlayer = libvlc_media_player_new_from_media(m_pMedia);
     if (!m_pMediaPlayer) { std::cerr << "[VLC] FAIL: libvlc_media_player_new_from_media\n"; return false; }
 
-    m_pEventManager = libvlc_media_player_event_manager(m_pMediaPlayer);
+    // ── vmem video output ─────────────────────────────────────────
+    // format_callbacks: VLC asks us for the output format → we always
+    // return I420 at (width x height), forcing ONE swscale pass
+    // (I420 full-res → I420 target-res, no chroma change = faster).
+    // Using format_callbacks (not set_format) prevents VLC's resize
+    // events from overwriting our format and causing buffer overflow.
+    libvlc_video_set_format_callbacks(m_pMediaPlayer,
+                                      StaticVideoSetup,
+                                      StaticVideoCleanup);
+    libvlc_video_set_callbacks(m_pMediaPlayer,
+                               StaticVideoLock,
+                               StaticVideoUnlock,
+                               StaticVideoDisplay,
+                               this);
 
     // ── Read FPS (VIDEOFILE only; RTSP unavailable before connection) ──
     if (m_mode == ModeVLC::VIDEOFILE) {
         m_mediaFPS = GetFPSfromMedia(m_pMedia);
     } else {
-        m_mediaFPS = 30.0;  // RTSP default (may vary depending on stream after connection)
+        m_mediaFPS = 30.0;
     }
 
     PlayMedia();
 
-    // Start frame pacing thread
     m_frameCount = 0;
     m_frameSeq   = 0;
     if (m_pThreadQueue == nullptr)
         m_pThreadQueue = new std::thread([this]() { ProcFrame(); });
 
-    // Start FPS calculation thread
     if (m_pThreadFPS == nullptr)
         m_pThreadFPS = new std::thread([this]() { CheckFPS(); });
 
@@ -196,14 +174,12 @@ bool VLCFrameGrabber::OpenVideo(const QString &url, int width, int height)
 }
 
 // ────────────────────────────────────────────────────────────────
-// Read FPS from media header (modern API, no deprecated calls)
+// Read FPS from media header
 // ────────────────────────────────────────────────────────────────
 double VLCFrameGrabber::GetFPSfromMedia(libvlc_media_t *pMedia)
 {
-    // Start async parsing (local file, 3-second timeout)
     libvlc_media_parse_with_options(pMedia, libvlc_media_parse_local, 3000);
 
-    // Wait for parsing to complete (poll up to 3 seconds)
     for (int i = 0; i < 300; ++i) {
         libvlc_media_parsed_status_t st = libvlc_media_get_parsed_status(pMedia);
         if (st == libvlc_media_parsed_status_done)    break;
@@ -215,7 +191,6 @@ double VLCFrameGrabber::GetFPSfromMedia(libvlc_media_t *pMedia)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    // Extract FPS from video track
     double fps = 0.0;
     libvlc_media_track_t **tracks = nullptr;
     unsigned count = libvlc_media_tracks_get(pMedia, &tracks);
@@ -232,43 +207,97 @@ double VLCFrameGrabber::GetFPSfromMedia(libvlc_media_t *pMedia)
 }
 
 // ────────────────────────────────────────────────────────────────
-// smem callback implementation
+// vmem callback implementation
 // ────────────────────────────────────────────────────────────────
-void VLCFrameGrabber::VideoPrerender(uint8_t **pp_pixel_buffer, int size)
+unsigned VLCFrameGrabber::VideoSetup(char *chroma, unsigned *width, unsigned *height,
+                                     unsigned *pitches, unsigned *lines)
 {
-    if (size > static_cast<int>(m_videoBufferSize) || !m_pVideoBuffer) {
-        m_pVideoBuffer.reset(new uint8_t[size]);
-        m_videoBufferSize = static_cast<size_t>(size);
+    // Use source native resolution for capture quality (VLM needs full detail).
+    // Cap at 1920x1080 to avoid 4K performance issues.
+    // VideoSurface::paint handles display scaling via letterbox — no resize needed here.
+    unsigned srcW = *width  ? *width  : 1920u;
+    unsigned srcH = *height ? *height : 1080u;
+
+    // Cap the longer dimension at 1920 — works for both landscape and portrait.
+    // e.g. 3840×2160 → 1920×1080, 2160×3840 → 1080×1920
+    const unsigned maxLong = 1920u;
+    unsigned longSide = std::max(srcW, srcH);
+    double scale = (longSide > maxLong) ? static_cast<double>(maxLong) / longSide : 1.0;
+
+    unsigned outW = (static_cast<unsigned>(srcW * scale) + 1) & ~1u;
+    unsigned outH = (static_cast<unsigned>(srcH * scale) + 1) & ~1u;
+    if (outW == 0) outW = 2;
+    if (outH == 0) outH = 2;
+
+    m_iWidth  = static_cast<int>(outW);
+    m_iHeight = static_cast<int>(outH);
+
+    memcpy(chroma, "I420", 4);
+    *width  = outW;
+    *height = outH;
+
+    pitches[0] = static_cast<unsigned>(m_iWidth);      lines[0] = static_cast<unsigned>(m_iHeight);
+    pitches[1] = static_cast<unsigned>(m_iWidth / 2);  lines[1] = static_cast<unsigned>(m_iHeight / 2);
+    pitches[2] = static_cast<unsigned>(m_iWidth / 2);  lines[2] = static_cast<unsigned>(m_iHeight / 2);
+    pitches[3] = lines[3] = 0;
+    pitches[4] = lines[4] = 0;
+
+    size_t bufSize = static_cast<size_t>(m_iWidth) * m_iHeight * 3 / 2;
+    if (bufSize > m_videoBufferSize || !m_pVideoBuffer) {
+        m_pVideoBuffer.reset(new uint8_t[bufSize]());
+        m_videoBufferSize = bufSize;
     }
-    m_lastFrameSize = size;
-    *pp_pixel_buffer = m_pVideoBuffer.get();
+    return 1;
 }
 
-void VLCFrameGrabber::VideoPostrender(uint8_t */*p_pixel_buffer*/)
+void* VLCFrameGrabber::VideoLock(void **planes)
 {
-    ++m_frameCount;  // VLC delivery FPS count
+    // I420: 3 planes — Y, U, V
+    uint8_t *buf = m_pVideoBuffer.get();
+    planes[0] = buf;                                                   // Y: w*h
+    planes[1] = buf + m_iWidth * m_iHeight;                            // U: (w/2)*(h/2)
+    planes[2] = buf + m_iWidth * m_iHeight + (m_iWidth/2)*(m_iHeight/2); // V
+    return nullptr;
+}
 
-    int actualH = (m_iWidth > 0 && m_lastFrameSize > 0)
-                  ? m_lastFrameSize / (m_iWidth * 3)
-                  : m_iHeight;
-    QImage img(m_pVideoBuffer.get(), m_iWidth, actualH,
-               m_iWidth * 3, QImage::Format_RGB888);
+void VLCFrameGrabber::VideoUnlock(void * /*picture*/, void * const * /*planes*/)
+{
+}
+
+void VLCFrameGrabber::VideoDisplay(void * /*picture*/)
+{
+    ++m_frameCount;
+
+    // Convert I420 → RGB888 at native source resolution (capped at 1920x1080)
+    const uint8_t *Y = m_pVideoBuffer.get();
+    const uint8_t *U = Y + m_iWidth * m_iHeight;
+    const uint8_t *V = U + (m_iWidth/2) * (m_iHeight/2);
+
+    QImage img(m_iWidth, m_iHeight, QImage::Format_RGB888);
+    for (int row = 0; row < m_iHeight; ++row) {
+        uchar *dst = img.scanLine(row);
+        for (int col = 0; col < m_iWidth; ++col) {
+            int y = Y[row * m_iWidth + col];
+            int u = U[(row/2) * (m_iWidth/2) + col/2] - 128;
+            int v = V[(row/2) * (m_iWidth/2) + col/2] - 128;
+            dst[col*3]   = static_cast<uchar>(qBound(0, (y*298 + v*409         + 128) >> 8, 255));
+            dst[col*3+1] = static_cast<uchar>(qBound(0, (y*298 - u*100 - v*208 + 128) >> 8, 255));
+            dst[col*3+2] = static_cast<uchar>(qBound(0, (y*298 + u*516         + 128) >> 8, 255));
+        }
+    }
 
     std::lock_guard<std::mutex> lk(m_mutexQueue);
-    // Max 30 frames (~1 second buffer) — absorbs VLC delivery speed fluctuations
     while (m_bufferQueue.size() >= 30) m_bufferQueue.pop();
-    m_bufferQueue.emplace(img.copy());
+    m_bufferQueue.emplace(std::move(img));
 }
 
 // ────────────────────────────────────────────────────────────────
-// Frame pacing thread — absorbs irregular VLC delivery and outputs at native FPS
-// Key: nextTime advances at the start of each loop — maintains timing even when queue is empty
+// Frame pacing thread — outputs at native FPS
 // ────────────────────────────────────────────────────────────────
 void VLCFrameGrabber::ProcFrame()
 {
     m_bLifeQueue = true;
 
-    // Compute frame interval from native video FPS (defaults to 30fps if zero)
     double fps = (m_mediaFPS > 0.0) ? m_mediaFPS : 30.0;
     auto frameInterval = std::chrono::microseconds(
         static_cast<int64_t>(1'000'000.0 / fps));
@@ -276,11 +305,8 @@ void VLCFrameGrabber::ProcFrame()
     auto nextTime = std::chrono::steady_clock::now();
 
     while (m_bLifeQueue) {
-        // (1) Advance next display time first (no drift even if queue is empty)
         nextTime += frameInterval;
 
-        // (2) Dequeue frame — FIFO (oldest first)
-        // Drains buffered frames when VLC is fast; smooth output when VLC is slow
         QImage frame;
         {
             std::lock_guard<std::mutex> lk(m_mutexQueue);
@@ -290,13 +316,11 @@ void VLCFrameGrabber::ProcFrame()
             }
         }
 
-        // (3) Present new frame if available
         if (!frame.isNull()) {
             SetFrame(frame);
-            ++m_frameSeq;  // VideoSurface timer detects this and calls update()
+            ++m_frameSeq;
         }
 
-        // (4) Sleep until next display time
         std::this_thread::sleep_until(nextTime);
     }
 }
@@ -327,7 +351,7 @@ void VLCFrameGrabber::CheckFPS()
 QImage VLCFrameGrabber::GetFrame()
 {
     std::lock_guard<std::mutex> lk(m_bufferMutex);
-    return m_frame;  // QImage implicit sharing — copy-on-write
+    return m_frame;
 }
 
 void VLCFrameGrabber::SetFrame(const QImage &frame)

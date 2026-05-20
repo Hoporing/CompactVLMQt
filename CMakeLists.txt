@@ -6,13 +6,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # LGPL compliance: dynamic (shared) libraries required — static linking prohibited
 set(BUILD_SHARED_LIBS ON)
-set(CMAKE_FIND_LIBRARY_SUFFIXES ".a" ".lib")
 
-# Qt path configuration (MinGW 64-bit)
-set(Qt6_DIR "C:/QT/6.10.2/mingw_64/lib/cmake/Qt6")
-set(CMAKE_PREFIX_PATH "C:/QT/6.10.2/mingw_64")
+# Qt path configuration (MSVC 2022 64-bit)
+set(Qt6_DIR "C:/Qt/6.11.1/msvc2022_64/lib/cmake/Qt6")
+set(CMAKE_PREFIX_PATH "C:/Qt/6.11.1/msvc2022_64")
 
-find_package(Qt6 6.10 REQUIRED COMPONENTS
+find_package(Qt6 6.11 REQUIRED COMPONENTS
     Core
     Gui
     Quick
@@ -39,7 +38,6 @@ set(APP_SOURCES
     src/VideoSurface.cpp
     src/VLMEngine.cpp
     src/VLMBridge.cpp
-    src/TranslateServerManager.cpp
     src/CaptureImageProvider.cpp
     src/ImageUtils.cpp
 )
@@ -50,7 +48,6 @@ set(APP_HEADERS
     src/VideoSurface.h
     src/VLMEngine.h
     src/VLMBridge.h
-    src/TranslateServerManager.h
     src/CaptureImageProvider.h
     src/ImageUtils.h
 )
@@ -100,30 +97,27 @@ qt_add_qml_module(CompactVLMQt
 # ────────────────────────────────────────────────────────────
 target_include_directories(CompactVLMQt PRIVATE
     src
-    "C:/libVLC/include"        # libvlc.h
+    "C:/libVLC/include"
 )
 
 # ────────────────────────────────────────────────────────────
 # Link external libraries (LGPL: all dynamically linked)
 # ────────────────────────────────────────────────────────────
 
-# libVLC (MinGW import lib — .a file generated with dlltool)
+# libVLC (MSVC import libs)
 find_library(LIBVLC_LIB
-    NAMES vlc libvlc
-    PATHS "C:/libVLC/bin/X64"
-    SUFFIXES ".a"
+    NAMES libvlc
+    PATHS "C:/libVLC/lib"
     NO_DEFAULT_PATH
 )
 find_library(LIBVLCCORE_LIB
-    NAMES vlccore libvlccore
-    PATHS "C:/libVLC/bin/X64"
-    SUFFIXES ".a"
+    NAMES libvlccore
+    PATHS "C:/libVLC/lib"
     NO_DEFAULT_PATH
 )
 
 if(NOT LIBVLC_LIB)
-    message(FATAL_ERROR "libvlc.a not found in C:/libVLC/bin/X64. "
-        "Run: gendef libvlc.dll && dlltool -d libvlc.def -l libvlc.a --dllname libvlc.dll")
+    message(FATAL_ERROR "libvlc.lib not found in C:/libVLC/lib.")
 endif()
 
 target_link_libraries(CompactVLMQt PRIVATE
@@ -146,46 +140,34 @@ target_link_libraries(CompactVLMQt PRIVATE
 # Compiler options
 # ────────────────────────────────────────────────────────────
 target_compile_options(CompactVLMQt PRIVATE
-    -Wall
-    -Wno-unused-parameter
-    -DUNICODE
-    -D_UNICODE
+    $<$<CXX_COMPILER_ID:MSVC>:/W3 /wd4100 /wd4101 /DUNICODE /D_UNICODE>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wno-unused-parameter -DUNICODE -D_UNICODE>
 )
+
+target_compile_definitions(CompactVLMQt PRIVATE _CRT_SECURE_NO_WARNINGS)
 
 # ────────────────────────────────────────────────────────────
 # Copy VLC plugins to executable directory
 # ────────────────────────────────────────────────────────────
 add_custom_command(TARGET CompactVLMQt POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "C:/libVLC/bin/X64/libvlc.dll"
+        "C:/libVLC/bin/libvlc.dll"
         $<TARGET_FILE_DIR:CompactVLMQt>
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "C:/libVLC/bin/X64/libvlccore.dll"
+        "C:/libVLC/bin/libvlccore.dll"
         $<TARGET_FILE_DIR:CompactVLMQt>
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "C:/libVLC/bin/X64/plugins"
+        "C:/libVLC/bin/plugins"
         "$<TARGET_FILE_DIR:CompactVLMQt>/plugins"
     COMMENT "Copying VLC DLLs and plugins..."
 )
 
-# ────────────────────────────────────────────────────────────
-# Copy translation server to executable directory
-# ────────────────────────────────────────────────────────────
-add_custom_command(TARGET CompactVLMQt POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/tools/translate_server.exe"
-        $<TARGET_FILE_DIR:CompactVLMQt>
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${CMAKE_SOURCE_DIR}/tools/argos_data"
-        "$<TARGET_FILE_DIR:CompactVLMQt>/argos_data"
-    COMMENT "Copying translation server and argos_data..."
-)
 
 # ────────────────────────────────────────────────────────────
 # Run windeployqt automatically (Release build)
 # ────────────────────────────────────────────────────────────
 if(WIN32)
-    set(DEPLOY_TOOL "C:/QT/6.10.2/mingw_64/bin/windeployqt6.exe")
+    set(DEPLOY_TOOL "C:/Qt/6.11.1/msvc2022_64/bin/windeployqt6.exe")
     if(EXISTS ${DEPLOY_TOOL})
         add_custom_command(TARGET CompactVLMQt POST_BUILD
             COMMAND ${DEPLOY_TOOL}

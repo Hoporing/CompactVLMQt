@@ -60,47 +60,6 @@ Item {
                     font { family: Theme.fontFamily; pixelSize: Theme.fontSizeSmall }
                 }
 
-                Rectangle {
-                    width:  10; height: 10; radius: 5
-                    color:  (vlmBridge && vlmBridge.translateReady) ? Theme.accentAlt : Theme.warning
-                }
-                Text {
-                    text:  "번역"
-                    color: Theme.textSecondary
-                    font { family: Theme.fontFamily; pixelSize: Theme.fontSizeSmall }
-                }
-
-                // Translator mode toggle
-                Rectangle {
-                    width:  translateModeLabel.implicitWidth + 12
-                    height: 20
-                    radius: Theme.radiusSmall
-                    color:  translateToggle.pressed ? Theme.bgMedium
-                            : translateToggle.hovered ? Theme.bgLight
-                            : Theme.bgLighter
-                    border.color: Theme.border
-                    border.width: 1
-
-                    Text {
-                        id: translateModeLabel
-                        anchors.centerIn: parent
-                        text:  (vlmBridge && vlmBridge.useOllamaTranslate) ? "Ollama" : "Argos"
-                        color: (vlmBridge && vlmBridge.useOllamaTranslate) ? Theme.accent
-                                                                            : Theme.textSecondary
-                        font { family: Theme.fontFamily; pixelSize: Theme.fontSizeSmall }
-                    }
-
-                    MouseArea {
-                        id: translateToggle
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            if (vlmBridge) vlmBridge.setUseOllamaTranslate(!vlmBridge.useOllamaTranslate)
-                        }
-                    }
-                }
-
                 Item { Layout.fillWidth: true }
 
                 Text {

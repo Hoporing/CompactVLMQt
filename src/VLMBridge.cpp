@@ -20,9 +20,6 @@ QString VLMBridge::modelName() const
     return m_engine ? QString::fromStdString(m_engine->GetModelName()) : QString();
 }
 
-// ────────────────────────────────────────────────────────────────
-// initialize() - called on QML startup or button click
-// ────────────────────────────────────────────────────────────────
 void VLMBridge::initialize()
 {
     if (m_processing) return;
@@ -31,11 +28,10 @@ void VLMBridge::initialize()
     auto *watcher = new QFutureWatcher<bool>(this);
     connect(watcher, &QFutureWatcher<bool>::finished, this,
             [this, watcher]() {
-                bool ollamaOk = m_engine->IsOllamaRunning();
-                setOllamaReady(ollamaOk);
-                setTranslateReady(m_engine->IsTranslateRunning());
+                bool ok = m_engine->IsOllamaRunning();
+                setOllamaReady(ok);
                 setProcessing(false);
-                emit initializationDone(ollamaOk);
+                emit initializationDone(ok);
                 watcher->deleteLater();
             });
 
@@ -45,19 +41,15 @@ void VLMBridge::initialize()
     }));
 }
 
-// ────────────────────────────────────────────────────────────────
-// sendChat() - asynchronous processing (non-blocking UI)
-// ────────────────────────────────────────────────────────────────
 void VLMBridge::sendChat(const QString &prompt, const QString &imageBase64)
 {
     if (m_processing || prompt.isEmpty()) return;
     setProcessing(true);
 
-    // Decode Base64 → QImage (VLMEngine expects QImage)
     QImage image;
     if (!imageBase64.isEmpty()) {
         QByteArray ba = QByteArray::fromBase64(imageBase64.toUtf8());
-        image.loadFromData(ba);  // Auto-detect format (handles both PNG and JPEG)
+        image.loadFromData(ba);
     }
 
     struct TaskResult {
@@ -72,7 +64,6 @@ void VLMBridge::sendChat(const QString &prompt, const QString &imageBase64)
                 auto res = watcher->result();
                 setProcessing(false);
                 setOllamaReady(m_engine->IsOllamaRunning());
-                setTranslateReady(m_engine->IsTranslateRunning());
                 if (res.success) emit responseReceived(res.responseText);
                 else             emit errorOccurred(res.errorMessage);
                 watcher->deleteLater();
@@ -92,23 +83,6 @@ void VLMBridge::clearHistory()
     if (m_engine) m_engine->ClearHistory();
 }
 
-bool VLMBridge::useOllamaTranslate() const
-{
-    return m_engine &&
-           m_engine->GetTranslatorMode() == VLMEngine::TranslatorMode::Ollama;
-}
-
-void VLMBridge::setUseOllamaTranslate(bool useOllama)
-{
-    if (!m_engine) return;
-    auto mode = useOllama ? VLMEngine::TranslatorMode::Ollama
-                          : VLMEngine::TranslatorMode::Argos;
-    if (m_engine->GetTranslatorMode() == mode) return;
-    m_engine->SetTranslatorMode(mode);
-    setTranslateReady(m_engine->IsTranslateRunning());
-    emit useOllamaTranslateChanged();
-}
-
 void VLMBridge::setProcessing(bool v)
 {
     if (m_processing == v) return;
@@ -121,11 +95,4 @@ void VLMBridge::setOllamaReady(bool v)
     if (m_ollamaReady == v) return;
     m_ollamaReady = v;
     emit ollamaReadyChanged();
-}
-
-void VLMBridge::setTranslateReady(bool v)
-{
-    if (m_translateReady == v) return;
-    m_translateReady = v;
-    emit translateReadyChanged();
 }

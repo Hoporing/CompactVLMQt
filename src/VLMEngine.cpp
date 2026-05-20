@@ -12,14 +12,6 @@ VLMEngine::VLMEngine(const std::string &ollamaUrl, const std::string &modelVisio
 {
 }
 
-VLMEngine::~VLMEngine()
-{
-    if (m_pTranslateServer) {
-        m_pTranslateServer->StopServer();
-        m_pTranslateServer.reset();
-    }
-}
-
 bool VLMEngine::Initialize()
 {
     try {
@@ -33,14 +25,7 @@ bool VLMEngine::Initialize()
             if (!StartOllamaServer()) return false;
         }
 
-        if (!m_pTranslateServer) {
-            m_pTranslateServer = std::make_unique<TranslateServerManager>();
-            if (!m_pTranslateServer->StartServer()) {
-                qWarning() << "[VLM] Translation server not available (translate_server.exe missing?)";
-                // Translation server failure does not affect Ollama initialization
-            }
-        }
-        return true;  // Return true if Ollama is OK
+        return true;
     } catch (const std::exception &e) {
         qWarning() << "[VLM] Initialize exception:" << e.what();
         return false;
@@ -52,7 +37,6 @@ bool VLMEngine::Initialize()
 
 bool VLMEngine::StartOllamaServer()
 {
-    // %LOCALAPPDATA%\Programs\Ollama\ollama.exe serve
     wchar_t localPath[MAX_PATH] = {};
     SHGetSpecialFolderPathW(NULL, localPath, CSIDL_LOCAL_APPDATA, FALSE);
     QString ollamaExe = QString::fromWCharArray(localPath)
@@ -76,9 +60,7 @@ bool VLMEngine::StartOllamaServer()
 
         for (int i = 0; i < 20; ++i) {
             Sleep(500);
-            if (m_pOllama->is_running()) {
-                return true;
-            }
+            if (m_pOllama->is_running()) return true;
         }
     }
     qWarning() << "[VLM] Failed to start Ollama";
@@ -96,27 +78,20 @@ VLMResult VLMEngine::SendChat(const QString &text, const QImage &image)
     try {
         qDebug() << "[1] Korean input:" << text;
 
-        // [1→2] Korean → English translation
         QString translatedPrompt = TranslateText(text, true);
         qDebug() << "[2] English translation:" << translatedPrompt;
 
-        // New image: reset conversation history so previous image descriptions
-        // do not contaminate the new image context.
         if (!image.isNull()) {
             m_sessionImage = image;
             m_messageHistory.clear();
         }
 
-        // Encode session image as Base64 and re-attach to every message so
-        // follow-up questions can reference the image without re-sending it.
         std::vector<ollama::image> images;
         if (!m_sessionImage.isNull()) {
             std::string b64 = imageToBase64(m_sessionImage);
             images.push_back(ollama::image::from_base64_string(b64));
         }
 
-        // Build history: strip image blobs from prior messages (text only),
-        // current message always carries the session image.
         ollama::messages historyToSend;
         for (const auto &msg : m_messageHistory) {
             historyToSend.push_back(ollama::message(
@@ -139,7 +114,6 @@ VLMResult VLMEngine::SendChat(const QString &text, const QImage &image)
             ollama::message assistantMsg("assistant", respText);
             m_messageHistory.push_back(assistantMsg);
 
-            // [3→4] English → Korean translation
             QString translated = TranslateText(QString::fromStdString(respText), false);
             qDebug() << "[4] Korean translation:" << translated;
 
@@ -169,31 +143,11 @@ bool VLMEngine::IsOllamaRunning() const
     return false;
 }
 
-bool VLMEngine::IsTranslateRunning() const
-{
-    if (m_translatorMode == TranslatorMode::Ollama)
-        return IsOllamaRunning();
-    return m_pTranslateServer && m_pTranslateServer->IsServerRunning();
-}
-
 QString VLMEngine::TranslateText(const QString &text, bool toEnglish)
 {
     if (text.isEmpty()) return {};
+    if (!m_pOllama) return text;
 
-    if (m_translatorMode == TranslatorMode::Ollama)
-        return OllamaTranslate(text, toEnglish);
-
-    // Argos mode
-    if (!m_pTranslateServer) return {};
-    QString from = toEnglish ? "ko" : "en";
-    QString to   = toEnglish ? "en" : "ko";
-    QString r    = m_pTranslateServer->Translate(text, from, to);
-    return r.isEmpty() ? "Failed to translate" : r;
-}
-
-QString VLMEngine::OllamaTranslate(const QString &text, bool toEnglish)
-{
-    if (!m_pOllama) return {};
     try {
         const std::string sysContent = toEnglish
             ? "You are a professional translator. "
@@ -207,7 +161,7 @@ QString VLMEngine::OllamaTranslate(const QString &text, bool toEnglish)
 
         ollama::messages msgs;
         msgs.push_back(ollama::message("system", sysContent));
-        msgs.push_back(ollama::message("user",   text.toStdString()));
+        msgs.push_back(ollama::message("user", text.toStdString()));
 
         ollama::response resp = m_pOllama->chat(
             m_translateModel, msgs,
@@ -219,30 +173,9 @@ QString VLMEngine::OllamaTranslate(const QString &text, bool toEnglish)
     } catch (const std::exception &e) {
         qWarning() << "[Translate] Ollama translate error:" << e.what();
     }
-    return {};
+    return text;
 }
 
-void VLMEngine::SetTranslatorMode(TranslatorMode mode)
-{
-    if (m_translatorMode == mode) return;
-    m_translatorMode = mode;
-
-    if (mode == TranslatorMode::Ollama) {
-        // Stop argos server to free resources (Python process + RAM)
-        if (m_pTranslateServer) {
-            m_pTranslateServer->StopServer();
-        }
-    } else {
-        // Start argos server
-        if (!m_pTranslateServer)
-            m_pTranslateServer = std::make_unique<TranslateServerManager>();
-        m_pTranslateServer->StartServer();
-    }
-}
-
-// ────────────────────────────────────────────────────────────────
-// QImage → PNG → Base64 (replaces cv::imencode)
-// ────────────────────────────────────────────────────────────────
 std::string VLMEngine::imageToBase64(const QImage &image)
 {
     QByteArray ba;

@@ -16,7 +16,6 @@ enum class ModeVLC
     VIDEOFILE,
 };
 
-// Replaced cv::Mat dependency (from MFC) with QImage
 class VLCFrameGrabber
 {
 public:
@@ -36,9 +35,10 @@ public:
     QImage  GetFrame();
     void    SetFrame(const QImage &frame);
 
-    // VLC smem callbacks (static → instance dispatch)
-    void VideoPrerender(uint8_t **pp_pixel_buffer, int size);
-    void VideoPostrender(uint8_t *p_pixel_buffer);
+    // vmem callbacks (static → instance dispatch)
+    void* VideoLock(void **planes);
+    void  VideoUnlock(void *picture, void * const *planes);
+    void  VideoDisplay(void *picture);
 
 private:
     bool Init();
@@ -46,14 +46,20 @@ private:
     void StopMedia();
     void ReleaseVLCInstances();
 
-    double GetFPSfromMedia(libvlc_media_t *pMedia); // Read FPS from media header
-    void ProcFrame(); // Frame pacing thread (outputs at native FPS)
-    void CheckFPS();  // FPS calculation thread
+    double GetFPSfromMedia(libvlc_media_t *pMedia);
+    void ProcFrame();
+    void CheckFPS();
 
-    static void StaticVideoPrerender(void *p_video_data,
-                                     uint8_t **pp_pixel_buffer, int size);
-    static void StaticVideoPostrender(void *p_video_data,
-                                      uint8_t *p_pixel_buffer);
+    static unsigned StaticVideoSetup(void **opaque, char *chroma,
+                                     unsigned *width, unsigned *height,
+                                     unsigned *pitches, unsigned *lines);
+    static void     StaticVideoCleanup(void *opaque);
+    static void*    StaticVideoLock(void *opaque, void **planes);
+    static void     StaticVideoUnlock(void *opaque, void *picture, void * const *planes);
+    static void     StaticVideoDisplay(void *opaque, void *picture);
+
+    unsigned VideoSetup(char *chroma, unsigned *width, unsigned *height,
+                        unsigned *pitches, unsigned *lines);
 
     // ── VLC instance (shared) ───────────────────────────────────
     static std::shared_ptr<libvlc_instance_t> g_sharedInstance;
@@ -62,18 +68,16 @@ private:
     libvlc_instance_t       *m_pInstance      = nullptr;
     libvlc_media_t          *m_pMedia         = nullptr;
     libvlc_media_player_t   *m_pMediaPlayer   = nullptr;
-    libvlc_event_manager_t  *m_pEventManager  = nullptr;
 
     // ── Buffer (raw buffer + QImage) ────────────────────────────
     std::mutex               m_bufferMutex;
     int                      m_iWidth          = 0;
     int                      m_iHeight         = 0;
     size_t                   m_videoBufferSize  = 0;
-    int                      m_lastFrameSize   = 0;   // Actual frame size passed from prerender to postrender
     std::unique_ptr<uint8_t[]> m_pVideoBuffer;
-    QImage                   m_frame;          // Latest frame (RGB888)
+    QImage                   m_frame;
 
-    // ── Frame queue (PostRender → ProcFrame) ──────────────────
+    // ── Frame queue (VideoDisplay → ProcFrame) ────────────────
     std::mutex               m_mutexQueue;
     std::queue<QImage>       m_bufferQueue;
     bool                     m_bLifeQueue      = false;
@@ -83,8 +87,8 @@ private:
     mutable std::mutex       m_mutexFPS;
     bool                     m_bLifeFPS        = false;
     std::thread             *m_pThreadFPS      = nullptr;
-    std::atomic<int>         m_frameCount      {0};  // VLC delivery count
-    std::atomic<uint64_t>    m_frameSeq        {0};  // Screen refresh trigger
-    double                   m_mediaFPS        = 30.0; // Native video FPS
+    std::atomic<int>         m_frameCount      {0};
+    std::atomic<uint64_t>    m_frameSeq        {0};
+    double                   m_mediaFPS        = 30.0;
     double                   m_fps             = 0.0;
 };
